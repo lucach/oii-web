@@ -384,7 +384,8 @@ class APIHandler(object):
         elif data['action'] == 'list':
             query = local.session.query(User)\
                 .filter(User.hidden == False)\
-                .order_by(desc(User.score))
+                .order_by(desc(User.score))\
+                .order_by(desc(User.id))
             if 'institute' in data:
                 query = query.filter(User.institute_id == data['institute'])
             users = query.slice(data['first'], data['last']).all()
