@@ -397,7 +397,8 @@ class APIHandler(object):
             if 'institute' in data and data['institute'] is not None:
                 local.user.institute_id = int(data['institute'])
                 resp['success'] = 1
-            if 'email' in data and data['email'] != '' and local.user.email != data['email']:
+            if 'email' in data and data['email'] != '' and \
+               local.user.email != data['email']:
                 resp = self.check_email(data['email'])
                 if not resp['success']:
                     return resp
@@ -1060,8 +1061,9 @@ class PracticeWebServer(Service):
         handler = APIHandler(self)
 
         self.wsgi_app = SharedDataMiddleware(handler, {
-            '/':        ('cms.web', 'practice'),
-            '/assets':  ('cms.web', 'assets')
+            '/':          ('cms.web', 'practice'),
+            '/assets':    ('cms.web', 'assets'),
+            '/resources': '/home/ioi/resources'
         })
 
     def run(self):
