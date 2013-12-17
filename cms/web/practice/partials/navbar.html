@@ -15,12 +15,12 @@
           <a ui-sref="overview"><i class="fa fa-home fa-lg"></i> {{'navbar.home' | l10n}}</a>
         </li>
 -->
-        <li class="dropdown">
+        <li ng-show="isLogged()" class="dropdown">
           <a class="dropdown-toggle" data-toggle="dropdown">
             <i class="fa fa-archive fa-lg"></i> {{'navbar.archive.title' | l10n}} <b class="caret"></b>
           </a>
           <ul class="dropdown-menu">
-            <li><a ui-sref="tasks({pageNum: 1})"><i class="fa fa-list-ol fa-fw"></i> {{'navbar.archive.allproblems' | l10n}}</a></li>
+            <li><a ng-show="!isLogged()" ui-sref="tasks({pageNum: 1})"><i class="fa fa-list-ol fa-fw"></i> {{'navbar.archive.allproblems' | l10n}}</a></li>
 <!--
             <li><a href="#"><i class="fa fa-flask fa-fw"></i> Tutti i problemi, per tecnica</a></li>
             <li><a href="#"><i class="fa fa-ban fa-fw"></i> Fase nazionale OII, per anno</a></li>
@@ -32,14 +32,14 @@
             <li><a ui-sref="tests"><i class="fa fa-pencil fa-fw"></i> {{'navbar.archive.scolastiche' | l10n}}</a></li>
           </ul>
         </li>
-        <li ng-class="{active: isActiveTab(4)}">
+        <li ng-show="isLogged()" ng-class="{active: isActiveTab(4)}">
           <a ui-sref="ranking({ pageNum: 1 })"><i class="fa fa-trophy fa-lg"></i> {{'navbar.ranking' | l10n}}</a>
         </li>
-        <li ng-class="{active: isActiveTab(2)}">
+        <li ng-show="isLogged()" ng-class="{active: isActiveTab(2)}">
           <a ui-sref="forums"><i class="fa fa-comments fa-lg"></i> {{'navbar.forum' | l10n}}</a>
         </li>
-        <li ng-class="{active: isActiveTab(5)}" ng-show="!isLogged()">
-          <a ui-sref="signup"><i class="fa fa-pencil fa-lg"></i> {{'navbar.signup' | l10n}}</a>
+        <li ng-class="{active: isActiveTab(2)}">
+          <a ui-sref="resources"><i class="fa fa-align-justify fa-lg"></i> Materiale</a>
         </li>
       </ul>
       <ul class="nav navbar-nav navbar-right">
