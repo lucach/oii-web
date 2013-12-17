@@ -114,6 +114,11 @@ angular.module('pws', [
         templateUrl: 'views/resources.html',
         controller: 'ResourcesCtrl'
       })
+      .state('taskdesc', {
+        url: '/taskdesc',
+        templateUrl: 'views/taskdesc.html',
+        controller: 'DescCtrl'
+      })
       .state('tests', {
         url: '/tests',
         templateUrl: 'views/tests.html',

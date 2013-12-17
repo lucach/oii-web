@@ -23,4 +23,6 @@
 angular.module('pws.resources', [])
   .controller('ResourcesCtrl', function($scope, navbarManager) {
     navbarManager.setActiveTab(5);
+  })
+  .controller('DescCtrl', function($scope, navbarManager) {
   });
