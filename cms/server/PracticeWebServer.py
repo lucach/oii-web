@@ -48,7 +48,8 @@ from cms.server import extract_archive
 from werkzeug.wrappers import Response, Request
 from werkzeug.wsgi import SharedDataMiddleware, wrap_file, responder
 from werkzeug.routing import Map, Rule
-from werkzeug.exceptions import HTTPException, NotFound, BadRequest
+from werkzeug.exceptions import HTTPException, NotFound, BadRequest, \
+    InternalServerError
 
 import gevent
 import gevent.wsgi
@@ -104,10 +105,14 @@ class APIHandler(object):
         self.EMAIL_REG = re.compile(r'[^@]+@[^@]+\.[^@]+')
         self.USERNAME_REG = re.compile(r'^[A-Za-z0-9_\.]+$')
 
-    def __call__(self, environ, start_response):
-        return self.wsgi_app(environ, start_response)
-
     @responder
+    def __call__(self, environ, start_response):
+        try:
+            return self.wsgi_app(environ, start_response)
+        except:
+            logger.error(traceback.format_exc())
+            return InternalServerError()
+
     def wsgi_app(self, environ, start_response):
         route = self.router.bind_to_environ(environ)
         try:
@@ -141,8 +146,8 @@ class APIHandler(object):
 
         with SessionGen() as local.session:
             try:
-                username = str(data['username'])
-                token = str(data['token'])
+                username = data['username']
+                token = data['token']
                 local.user = self.get_user(username, token)
             except (BadRequest, KeyError, UnicodeEncodeError):
                 local.user = None
@@ -180,9 +185,12 @@ class APIHandler(object):
         return (res, num)
 
     def get_user(self, username, token):
-        return local.session.query(User)\
-            .filter(User.username == username)\
-            .filter(User.password == token).first()
+        try:
+            return local.session.query(User)\
+                .filter(User.username == username)\
+                .filter(User.password == token).first()
+        except UnicodeDecodeError:
+            return None
 
     def check_user(self, username):
         if len(username) < 4:
@@ -425,13 +433,24 @@ class APIHandler(object):
         else:
             return 'Bad request'
 
+    def heartbeat_handler(self):
+        if local.user is None:
+            return 'Unauthorized'
+        local.resp['unreadtalks'] = local.session.query(Talk)\
+            .filter(Talk.receiver_id == local.user.id)\
+            .filter(Talk.read == False).count()
+
     def task_handler(self):
         if local.data['action'] == 'list':
             query = local.session.query(Task)\
                 .filter(Task.access_level >= local.access_level)\
                 .order_by(desc(Task.id))
-            if 'tag' in local.data:
+            if 'tag' in local.data and local.data['tag'] is not None:
                 query = query.filter(Task.tags.any(name=local.data['tag']))
+            if 'search' in local.data and local.data['search'] is not None:
+                sq = '%%%s%%' % local.data['search']
+                query = query.filter(or_(Task.title.ilike(sq),
+                                         Task.name.ilike(sq)))
             tasks, local.resp['num'] = self.sliced_query(query)
             local.resp['tasks'] = []
             for t in tasks:
@@ -1122,6 +1141,8 @@ class APIHandler(object):
                                 timestamp=make_datetime())
             pm.sender_id = local.user.id
             pm.talk = talk
+            if talk.sender_id != pm.sender_id:
+                talk.sender, talk.receiver = talk.receiver, talk.sender
             talk.timestamp = pm.timestamp
             talk.read = False
             local.session.add(pm)

@@ -43,13 +43,36 @@ angular.module('pws.user', [])
       return $stateParams.userId === userManager.getUser().username;
     };
   })
-  .factory('userManager', function($http, $sce, notificationHub) {
+  .factory('userManager', function($http, $timeout, $sce, notificationHub, l10n) {
     var getIt = function() {
       return JSON.parse(localStorage.getItem('user')) || {};
+    };
+    var heartbeat_timeout = undefined;
+    var heartbeat = function() {
+      heartbeat_timeout = $timeout(heartbeat, 60000);
+      if(getIt().hasOwnProperty("token")) {
+        $http.post('heartbeat', {
+            'username': getIt().username,
+            'token':    getIt().token
+          })
+          .success(function(data, status, headers, config) {
+            if (data.success === 0) {
+              localStorage.removeItem('user');
+              notificationHub.createAlert('danger', l10n.get('Sign in error'), 3);
+            } else {
+              var user = getIt();
+              user.unreadtalks = data.unreadtalks;
+              localStorage.setItem('user', JSON.stringify(user));
+            }
+          }).error(function(data, status, headers, config) {
+            notificationHub.serverError(status);
+          });
+      }
     };
     return {
       getUser: getIt,
       isLogged: function() {
+        if(heartbeat_timeout === undefined) heartbeat();
         return getIt().hasOwnProperty("token");
       },
       getGravatar: function(user, size) {
