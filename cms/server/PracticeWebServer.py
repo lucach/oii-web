@@ -28,15 +28,11 @@ import mimetypes
 import traceback
 import pkg_resources
 import urllib
-
-
-from urlparse import parse_qs, urlparse
-from hashlib import sha256
 import hmac
+
+from hashlib import sha256
+
 from base64 import b64decode, b64encode
-
-
-from base64 import b64decode
 from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
