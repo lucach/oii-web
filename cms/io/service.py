@@ -1,9 +1,9 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
-# Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
-# Copyright © 2010-2013 Stefano Maggiolo <s.maggiolo@gmail.com>
+# Contest Management System - http://cms-dev.github.io/
+# Copyright © 2010-2014 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
+# Copyright © 2010-2014 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
 # Copyright © 2013 Luca Wehrstedt <luca.wehrstedt@gmail.com>
 #
@@ -26,8 +26,8 @@ using gevent and JSON encoding.
 """
 
 from __future__ import absolute_import
-from __future__ import unicode_literals
 from __future__ import print_function
+from __future__ import unicode_literals
 
 import errno
 import functools
@@ -37,7 +37,6 @@ import pwd
 import signal
 import socket
 import _socket
-import sys
 import time
 
 import gevent
@@ -46,12 +45,14 @@ import gevent.event
 from gevent.server import StreamServer
 from gevent.backdoor import BackdoorServer
 
-from cms import config, mkdir, ServiceCoord, Address, get_service_address
+from cms import ConfigError, config, mkdir, ServiceCoord, Address, \
+    get_service_address
 from cms.log import root_logger, shell_handler, ServiceFilter, \
     CustomFormatter, LogServiceHandler, FileHandler
 from cmscommon.datetime import monotonic_time
 
-from .rpc import rpc_method, RemoteServiceServer, RemoteServiceClient
+from .rpc import rpc_method, RemoteServiceServer, RemoteServiceClient, \
+    FakeRemoteServiceClient
 
 
 logger = logging.getLogger(__name__)
@@ -99,9 +100,9 @@ class Service(object):
         try:
             address = get_service_address(self._my_coord)
         except KeyError:
-            logger.critical("Couldn't find %r in the configuration.",
-                            self._my_coord)
-            sys.exit(1)
+            raise ConfigError("Unable to find address for service %r. "
+                              "Is it specified in core_services in cms.conf?" %
+                              (self._my_coord,))
 
         self.rpc_server = StreamServer(address, self._connection_handler)
         self.backdoor = None
@@ -130,7 +131,11 @@ class Service(object):
         # Install a file handler.
         file_handler = FileHandler(os.path.join(log_dir, log_filename),
                                    mode='w', encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
+        if config.file_log_debug:
+            file_log_level = logging.DEBUG
+        else:
+            file_log_level = logging.INFO
+        file_handler.setLevel(file_log_level)
         file_handler.setFormatter(CustomFormatter(False))
         file_handler.addFilter(filter_)
         root_logger.addHandler(file_handler)
@@ -168,7 +173,8 @@ class Service(object):
         remote_service = RemoteServiceServer(self, address)
         remote_service.handle(sock)
 
-    def connect_to(self, coord, on_connect=None, on_disconnect=None):
+    def connect_to(self, coord, on_connect=None, on_disconnect=None,
+                   must_be_present=True):
         """Return a proxy to a remote service.
 
         Obtain a communication channel to the remote service at the
@@ -176,13 +182,30 @@ class Service(object):
         on_connect and on_disconnect handlers and return it.
 
         coord (ServiceCoord): the coord of the service to connect to.
-        on_connect (function): to be called when the service connects.
-        on_disconnect (function): to be called when it disconnects.
+        on_connect (function|None): to be called when the service
+            connects.
+        on_disconnect (function|None): to be called when it
+            disconnects.
+        must_be_present (bool): if True, the coord must be present in
+            the configuration; otherwise, it can be missing and in
+            that case the return value is a fake client (that is, a
+            client that never connects and ignores all calls).
+
         return (RemoteServiceClient): a proxy to that service.
 
         """
         if coord not in self.remote_services:
-            service = RemoteServiceClient(coord, auto_retry=0.5)
+            try:
+                service = RemoteServiceClient(coord, auto_retry=0.5)
+            except KeyError:
+                # The coordinates are invalid: raise a ConfigError if
+                # the service was needed, or return a dummy client if
+                # the service was optional.
+                if must_be_present:
+                    raise ConfigError("Missing address and port for %s "
+                                      "in cms.conf." % (coord, ))
+                else:
+                    service = FakeRemoteServiceClient(coord, None)
             service.connect()
             self.remote_services[coord] = service
         else:

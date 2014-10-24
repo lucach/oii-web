@@ -1,11 +1,11 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
-# Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
+# Contest Management System - http://cms-dev.github.io/
+# Copyright © 2010-2014 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2014 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
-# Copyright © 2013 Luca Wehrstedt <luca.wehrstedt@gmail.com>
+# Copyright © 2013-2014 Luca Wehrstedt <luca.wehrstedt@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -25,6 +25,10 @@ that saves the resources usage in that machine.
 
 """
 
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import bisect
 import logging
 import os
@@ -36,13 +40,26 @@ from gevent import subprocess
 #import gevent_subprocess as subprocess
 
 from cms import config, get_safe_shard, ServiceCoord
-from cms.io import Service, rpc_method, RemoteServiceClient
+from cms.io import Service, rpc_method
 
 
 logger = logging.getLogger(__name__)
 
 
 B_TO_MB = 1024.0 * 1024.0
+
+# As psutil-2.0 introduced many backward-incompatible changes to its
+# API we define this global flag to make it easier later on to decide
+# which methods, properties, etc. to use.
+PSUTIL2 = psutil.version_info >= (2, 0)
+
+if PSUTIL2:
+    PSUTIL_PROC_ATTRS = \
+        ["cmdline", "cpu_times", "create_time", "memory_info", "num_threads"]
+else:
+    PSUTIL_PROC_ATTRS = \
+        ["cmdline", "get_cpu_times", "create_time",
+         "get_memory_info", "get_num_threads"]
 
 
 class ResourceService(Service):
@@ -138,8 +155,8 @@ class ResourceService(Service):
             if not running:
                 # We give contest_id even if the service doesn't need
                 # it, since it causes no trouble.
-                logger.info("Restarting (%s, %s)..." % (service.name,
-                                                        service.shard))
+                logger.info("Restarting (%s, %s)...",
+                            service.name, service.shard)
                 devnull = os.open(os.devnull, os.O_WRONLY)
                 command = "cms%s" % service.name
                 if not config.installed:
@@ -148,9 +165,9 @@ class ResourceService(Service):
                         "scripts",
                         "cms%s" % service.name)
                 process = subprocess.Popen([command,
-                                            str(service.shard),
+                                            "%d" % service.shard,
                                             "-c",
-                                            str(self.contest_id)],
+                                            "%d" % self.contest_id],
                                            stdout=devnull,
                                            stderr=subprocess.STDOUT
                                            )
@@ -221,16 +238,19 @@ class ResourceService(Service):
         """Returns the pid of a given service running on this machine.
 
         service (ServiceCoord): the service we are interested in
-        returns (psutil.Process): the process of service, or None if
-                                  not found
+
+        return (psutil.Process|None): the process of service, or None
+             if not found
 
         """
         logger.debug("ResourceService._find_proc")
         for proc in psutil.get_process_list():
             try:
-                if ResourceService._is_service_proc(service, proc.cmdline):
+                proc_info = proc.as_dict(attrs=PSUTIL_PROC_ATTRS)
+                if ResourceService._is_service_proc(
+                        service, proc_info["cmdline"]):
                     self._services_prev_cpu_times[service] = \
-                        proc.get_cpu_times()
+                        proc_info["cpu_times"]
                     return proc
             except psutil.NoSuchProcess:
                 continue
@@ -275,7 +295,8 @@ class ResourceService(Service):
                                           self._prev_cpu_times[x])
                                    / delta * 100.0)))
                            for x in cpu_times)
-        data["cpu"]["num_cpu"] = psutil.NUM_CPUS
+        data["cpu"]["num_cpu"] = \
+            psutil.cpu_count() if PSUTIL2 else psutil.NUM_CPUS
         self._prev_cpu_times = cpu_times
 
         # Memory. The following relations hold (I think... I only
@@ -320,14 +341,15 @@ class ResourceService(Service):
                     dic["running"] = False
             # If the process is not running, we have nothing to do.
             if not dic["running"]:
-                data["services"][str(service)] = dic
+                data["services"]["%s" % (service,)] = dic
                 continue
 
             try:
-                dic["since"] = self._last_saved_time - proc.create_time
+                proc_info = proc.as_dict(attrs=PSUTIL_PROC_ATTRS)
+                dic["since"] = self._last_saved_time - proc_info["create_time"]
                 dic["resident"], dic["virtual"] = \
-                    (x / 1048576 for x in proc.get_memory_info())
-                cpu_times = proc.get_cpu_times()
+                    (x // B_TO_MB for x in proc_info["memory_info"])
+                cpu_times = proc_info["cpu_times"]
                 dic["user"] = int(
                     round((cpu_times[0] -
                            self._services_prev_cpu_times[service][0])
@@ -338,7 +360,7 @@ class ResourceService(Service):
                           / delta * 100))
                 self._services_prev_cpu_times[service] = cpu_times
                 try:
-                    dic["threads"] = proc.get_num_threads()
+                    dic["threads"] = proc_info["num_threads"]
                 except AttributeError:
                     dic["threads"] = 0  # 0 = Not implemented
 
@@ -347,7 +369,7 @@ class ResourceService(Service):
                 # Shut down while we operated?
                 dic = {"autorestart": self._will_restart[service],
                        "running": False}
-            data["services"][str(service)] = dic
+            data["services"]["%s" % (service,)] = dic
 
         if store:
             if len(self._local_store) >= 5000:  # almost 7 hours
@@ -378,7 +400,7 @@ class ResourceService(Service):
         service (string): format: name,shard.
 
         """
-        logger.info("Killing %s as asked." % service)
+        logger.info("Killing %s as asked.", service)
         try:
             idx = service.rindex(",")
         except ValueError:
@@ -389,8 +411,9 @@ class ResourceService(Service):
         except ValueError:
             logger.error("Unable to decode service shard.")
 
-        remote_service = RemoteServiceClient(ServiceCoord(name, shard))
-        remote_service.quit(reason="Asked by ResourceService")
+        remote_service = self.connect_to(ServiceCoord(name, shard))
+        result = remote_service.quit(reason="Asked by ResourceService")
+        return result.get()
 
     @rpc_method
     def toggle_autorestart(self, service):
@@ -419,7 +442,7 @@ class ResourceService(Service):
         service = ServiceCoord(name, shard)
 
         self._will_restart[service] = not self._will_restart[service]
-        logger.info("Will restart %s,%s is now %s." %
-                    (service.name, service.shard, self._will_restart[service]))
+        logger.info("Will restart %s,%s is now %s.",
+                    service.name, service.shard, self._will_restart[service])
 
         return self._will_restart[service]

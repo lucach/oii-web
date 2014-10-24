@@ -1,7 +1,7 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2012 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2012 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
@@ -30,9 +30,12 @@ compilation and the evaluation are contained in the task type class.
 
 """
 
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import logging
 import re
-import traceback
 
 from cms import config
 from cms.grading import JobException
@@ -59,7 +62,7 @@ def create_sandbox(file_cacher):
         sandbox = Sandbox(file_cacher)
     except (OSError, IOError):
         err_msg = "Couldn't create sandbox."
-        logger.error("%s\n%s" % (err_msg, traceback.format_exc()))
+        logger.error(err_msg, exc_info=True)
         raise JobException(err_msg)
     return sandbox
 
@@ -76,7 +79,7 @@ def delete_sandbox(sandbox):
             sandbox.delete()
         except (IOError, OSError):
             err_msg = "Couldn't delete sandbox."
-            logger.warning("%s\n%s" % (err_msg, traceback.format_exc()))
+            logger.warning(err_msg, exc_info=True)
 
 
 class TaskType(object):

@@ -1,8 +1,9 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2013 Luca Wehrstedt <luca.wehrstedt@gmail.com>
+# Copyright © 2014 Stefano Maggiolo <s.maggiolo@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -18,8 +19,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from __future__ import absolute_import
-from __future__ import unicode_literals
 from __future__ import print_function
+from __future__ import unicode_literals
 
 
 # Define what this package will provide.
@@ -29,6 +30,10 @@ __all__ = [
     "RPCError", "rpc_method", "RemoteServiceServer", "RemoteServiceClient",
     # service
     "Service",
+    # triggeredservice
+    "Executor", "TriggeredService",
+    # priorityqueue
+    "FakeQueueItem", "PriorityQueue", "QueueEntry", "QueueItem",
     # web_rpc
     "RPCMiddleware",
     # web_service
@@ -38,8 +43,10 @@ __all__ = [
 
 # Instantiate or import these objects.
 
+from .priorityqueue import FakeQueueItem, PriorityQueue, QueueEntry, QueueItem
 from .rpc import RPCError, rpc_method, RemoteServiceServer, RemoteServiceClient
 from .service import Service
+from .triggeredservice import Executor, TriggeredService
 from .web_rpc import RPCMiddleware
 from .web_service import WebService
 

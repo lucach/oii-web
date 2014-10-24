@@ -1,7 +1,7 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2013 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
@@ -24,7 +24,10 @@
 
 """
 
+from __future__ import absolute_import
 from __future__ import print_function
+# setuptools doesn't seem to like this:
+# from __future__ import unicode_literals
 
 import sys
 import os
@@ -58,6 +61,9 @@ def do_setup():
             os.path.join("templates", "contest", "*.*"),
             os.path.join("templates", "admin", "*.*"),
             os.path.join("templates", "ranking", "*.*"),
+        ],
+        "cms.service": [
+            os.path.join("templates", "printing", "*.*"),
         ],
         "cms.web": [
             os.path.join("assets", "css", "*.*"),
@@ -113,7 +119,7 @@ def do_setup():
                 os.chmod(file_, 0644)
 
     setup(name="cms",
-          version="1.1.0pre",
+          version="1.2.0pre",
           author="The CMS development team",
           author_email="contestms@freelists.org",
           url="https://github.com/cms-dev/cms",
@@ -152,6 +158,7 @@ def do_setup():
                    "scripts/cmsContestWebServer",
                    "scripts/cmsAdminWebServer",
                    "scripts/cmsProxyService",
+                   "scripts/cmsPrintingService",
                    "scripts/cmsPracticeWebServer",
 
                    "scripts/cmsRankingWebServer",
@@ -267,7 +274,7 @@ def build():
     """
     print("compiling isolate...")
     os.chdir("isolate")
-    os.system(os.path.join(".", "compile.sh"))
+    os.system("make")
     os.chdir("..")
 
     print("compiling localization files:")

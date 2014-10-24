@@ -1,7 +1,7 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2012 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2012 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
@@ -26,6 +26,7 @@
 """
 
 from __future__ import absolute_import
+from __future__ import print_function
 from __future__ import unicode_literals
 
 import logging
@@ -64,6 +65,8 @@ __all__ = [
     # usertest
     "UserTest", "UserTestFile", "UserTestManager", "UserTestResult",
     "UserTestExecutable",
+    # printjob
+    "PrintJob",
     # fsobject
     "FSObject",
     # init
@@ -71,7 +74,8 @@ __all__ = [
     # drop
     "drop_db",
     # util
-    "get_contest_list", "is_contest_id", "ask_for_contest",
+    "test_db_connection", "get_contest_list", "is_contest_id",
+    "ask_for_contest",
     # test
     "Test", "TestQuestion", "QuestionFile", "TestScore",
     # forum
@@ -81,7 +85,7 @@ __all__ = [
 
 # Instantiate or import these objects.
 
-version = 8
+version = 13
 
 
 engine = create_engine(config.database, echo=config.database_debug,
@@ -104,12 +108,14 @@ from .usertest import UserTest, UserTestFile, UserTestManager, \
     UserTestResult, UserTestExecutable
 from .test import Test, TestQuestion, QuestionFile, TestScore
 from .forum import PrivateMessage, Talk, Forum, Topic, Post
+from .printjob import PrintJob
 from .fsobject import FSObject
 
 from .init import init_db
 from .drop import drop_db
 
-from .util import get_contest_list, is_contest_id, ask_for_contest
+from .util import test_db_connection, get_contest_list, is_contest_id, \
+    ask_for_contest
 
 
 configure_mappers()

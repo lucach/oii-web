@@ -1,12 +1,13 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2014 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
-# Copyright © 2010-2013 Stefano Maggiolo <s.maggiolo@gmail.com>
+# Copyright © 2010-2014 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
 # Copyright © 2013 Bernard Blackham <bernard@largestprime.net>
 # Copyright © 2013-2014 Luca Wehrstedt <luca.wehrstedt@gmail.com>
+# Copyright © 2014 Fabian Gundlach <320pointsguy@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -21,10 +22,15 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import codecs
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import unicode_literals
+
+import io
 import json
 import logging
 import os
+import six
 
 from collections import namedtuple
 
@@ -100,7 +106,8 @@ def get_compilation_commands(language, source_filenames, executable_filename,
         command = ["/usr/bin/g++"]
         if for_evaluation:
             command += ["-DEVAL"]
-        command += ["-static", "-O2", "-o", executable_filename]
+        command += ["-static", "-O2", "-std=c++11",
+                    "-o", executable_filename]
         command += source_filenames
         commands.append(command)
     elif language == LANG_PASCAL:
@@ -127,12 +134,10 @@ def get_compilation_commands(language, source_filenames, executable_filename,
         command = ["/bin/cp", source_filenames[0], executable_filename]
         commands.append(command)
     elif language == LANG_JAVA:
-        class_name = "Task"  # Submitted java class must be called Task.
-        mv_command = ["/bin/mv", source_filenames[0], "%s.java" % class_name]
-        gcj_command = ["/usr/bin/gcj", "--main=%s" % class_name, "-O3", "-o",
-                       executable_filename, "%s.java" % class_name]
-        commands.append(mv_command)
-        commands.append(gcj_command)
+        class_name = os.path.splitext(source_filenames[0])[0]
+        command = ["/usr/bin/gcj", "--main=%s" % class_name, "-O3", "-o",
+                   executable_filename] + source_filenames
+        commands.append(command)
     else:
         raise ValueError("Unknown language %s." % language)
     return commands
@@ -181,8 +186,9 @@ def format_status_text(status, translator=None):
     returned.
 
     status ([unicode]|unicode): a status, as described above.
-    translator (function): a function expecting a string and returning
-        that same string translated in some language.
+    translator (function|None): a function expecting a string and
+        returning that same string translated in some language, or
+        None to apply the identity.
 
     """
     # Mark strings for localization.
@@ -192,13 +198,15 @@ def format_status_text(status, translator=None):
         translator = lambda x: x
 
     try:
-        if isinstance(status, (str, unicode)):
+        if isinstance(status, six.text_type):
             status = json.loads(status)
+        elif not isinstance(status, list):
+            raise TypeError("Invalid type: %r" % type(status))
 
         return translator(status[0]) % tuple(status[1:])
     except:
         logger.error("Unexpected error when formatting status "
-                     "text: %r" % status, exc_info=True)
+                     "text: %r", status, exc_info=True)
         return translator("N/A")
 
 
@@ -229,7 +237,7 @@ def compilation_step(sandbox, commands):
         box_success = sandbox.execute_without_std(command, wait=True)
         if not box_success:
             logger.error("Compilation aborted because of "
-                         "sandbox error in `%s'." % sandbox.path)
+                         "sandbox error in `%s'.", sandbox.path)
             return False, None, None, None
 
     # Detect the outcome of the compilation.
@@ -284,7 +292,7 @@ def compilation_step(sandbox, commands):
     # to the user
     elif exit_status == Sandbox.EXIT_SIGNAL:
         signal = sandbox.get_killing_signal()
-        logger.debug("Compilation killed with signal %s." % (signal))
+        logger.debug("Compilation killed with signal %s.", signal)
         success = True
         compilation_success = False
         plus["signal"] = signal
@@ -301,7 +309,7 @@ def compilation_step(sandbox, commands):
     elif exit_status == Sandbox.EXIT_SYSCALL:
         syscall = sandbox.get_killing_syscall()
         logger.error("Compilation aborted "
-                     "because of forbidden syscall `%s'." % syscall)
+                     "because of forbidden syscall `%s'.", syscall)
 
     # Forbidden file access: this could be triggered by the user
     # including a forbidden file or too strict sandbox contraints; the
@@ -309,7 +317,7 @@ def compilation_step(sandbox, commands):
     elif exit_status == Sandbox.EXIT_FILE_ACCESS:
         filename = sandbox.get_forbidden_file_error()
         logger.error("Compilation aborted "
-                     "because of forbidden access to file `%s'." % filename)
+                     "because of forbidden access to file `%s'.", filename)
 
     # Why the exit status hasn't been captured before?
     else:
@@ -345,7 +353,7 @@ def evaluation_step(sandbox, commands,
 
     success, plus = evaluation_step_after_run(sandbox)
     if not success:
-        logger.debug("Job failed in evaluation_step_after_run: %r" % plus)
+        logger.debug("Job failed in evaluation_step_after_run: %r", plus)
 
     return success, plus
 
@@ -417,7 +425,7 @@ def evaluation_step_after_run(sandbox):
     # the error to the user.
     elif exit_status == Sandbox.EXIT_SIGNAL:
         signal = sandbox.get_killing_signal()
-        logger.debug("Execution killed with signal %d." % signal)
+        logger.debug("Execution killed with signal %d.", signal)
         success = True
         plus["signal"] = signal
 
@@ -432,7 +440,7 @@ def evaluation_step_after_run(sandbox):
     elif exit_status == Sandbox.EXIT_SYSCALL:
         syscall = sandbox.get_killing_syscall()
         logger.debug("Execution killed because of forbidden "
-                     "syscall: `%s'." % syscall)
+                     "syscall: `%s'.", syscall)
         success = True
         plus["syscall"] = syscall
 
@@ -441,7 +449,7 @@ def evaluation_step_after_run(sandbox):
     elif exit_status == Sandbox.EXIT_FILE_ACCESS:
         filename = sandbox.get_forbidden_file_error()
         logger.debug("Execution killed because of forbidden "
-                     "file access: `%s'." % filename)
+                     "file access: `%s'.", filename)
         success = True
         plus["filename"] = filename
 
@@ -534,25 +542,25 @@ def extract_outcome_and_text(sandbox):
     """
     stdout = sandbox.relative_path(sandbox.stdout_file)
     stderr = sandbox.relative_path(sandbox.stderr_file)
-    with codecs.open(stdout, "r", "utf-8") as stdout_file:
-        with codecs.open(stderr, "r", "utf-8") as stderr_file:
+    with io.open(stdout, "r", encoding="utf-8") as stdout_file:
+        with io.open(stderr, "r", encoding="utf-8") as stderr_file:
             try:
                 outcome = stdout_file.readline().strip()
             except UnicodeDecodeError as error:
                 logger.error("Unable to interpret manager stdout "
-                             "(outcome) as unicode. %r" % error)
+                             "(outcome) as unicode. %r", error)
                 raise ValueError("Cannot decode the outcome.")
             try:
                 text = filter_ansi_escape(stderr_file.readline())
             except UnicodeDecodeError as error:
                 logger.error("Unable to interpret manager stderr "
-                             "(text) as unicode. %r" % error)
+                             "(text) as unicode. %r", error)
                 raise ValueError("Cannot decode the text.")
 
     try:
         outcome = float(outcome)
     except ValueError:
-        logger.error("Wrong outcome `%s' from manager." % outcome)
+        logger.error("Wrong outcome `%s' from manager.", outcome)
         raise ValueError("Outcome is not a float.")
 
     return outcome, [text]
@@ -560,7 +568,10 @@ def extract_outcome_and_text(sandbox):
 
 ## Automatic white diff. ##
 
-WHITES = " \t\n\r"
+# We take as definition of whitespaces the intersection between ASCII
+# and Unicode White_Space characters (see
+# http://www.unicode.org/Public/6.3.0/ucd/PropList.txt)
+WHITES = b' \t\n\x0b\x0c\r'
 
 
 def white_diff_canonicalize(string):
@@ -647,8 +658,8 @@ def white_diff_step(sandbox, output_filename,
         sandbox.
     correct_output_filename (string): the same with reference output.
 
-    return ((float, [str])): the outcome as above and a description
-        text.
+    return ((float, [unicode])): the outcome as above and a
+        description text.
 
     """
     if sandbox.file_exists(output_filename):

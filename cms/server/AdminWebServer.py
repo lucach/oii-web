@@ -1,11 +1,13 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
-# Copyright © 2010-2012 Stefano Maggiolo <s.maggiolo@gmail.com>
+# Copyright © 2010-2014 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
 # Copyright © 2012-2014 Luca Wehrstedt <luca.wehrstedt@gmail.com>
+# Copyright © 2014 Artem Iglikov <artem.iglikov@gmail.com>
+# Copyright © 2014 Fabian Gundlach <320pointsguy@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -24,6 +26,10 @@
 
 """
 
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import base64
 import json
 import logging
@@ -32,6 +38,8 @@ import pkg_resources
 import re
 import traceback
 from datetime import datetime, timedelta
+from StringIO import StringIO
+import zipfile
 
 from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import IntegrityError
@@ -71,7 +79,7 @@ def try_commit(session, handler):
     except IntegrityError as error:
         handler.application.service.add_notification(
             make_datetime(),
-            "Operation failed.", str(error))
+            "Operation failed.", "%s" % error)
         return False
     else:
         handler.application.service.add_notification(
@@ -227,7 +235,6 @@ class BaseHandler(CommonRequestHandler):
                 .filter(Question.ignored == False)\
                 .count()  # noqa
         params["contest_list"] = self.sql_session.query(Contest).all()
-        params["cookie"] = str(self.cookies)
         return params
 
     def finish(self, *args, **kwds):
@@ -254,8 +261,8 @@ class BaseHandler(CommonRequestHandler):
                 kwargs["exc_info"][0] != tornado.web.HTTPError:
             exc_info = kwargs["exc_info"]
             logger.error(
-                "Uncaught exception (%r) while processing a request: %s" %
-                (exc_info[1], ''.join(traceback.format_exception(*exc_info))))
+                "Uncaught exception (%r) while processing a request: %s",
+                exc_info[1], ''.join(traceback.format_exception(*exc_info)))
 
         # Most of the handlers raise a 404 HTTP error before r_params
         # is defined. If r_params is not defined we try to define it
@@ -469,8 +476,12 @@ class AdminWebServer(WebService):
             ServiceCoord("EvaluationService", 0))
         self.scoring_service = self.connect_to(
             ServiceCoord("ScoringService", 0))
+
+        ranking_enabled = len(config.rankings) > 0
         self.proxy_service = self.connect_to(
-            ServiceCoord("ProxyService", 0))
+            ServiceCoord("ProxyService", 0),
+            must_be_present=ranking_enabled)
+
         self.resource_services = []
         for i in xrange(get_service_shards("ResourceService")):
             self.resource_services.append(self.connect_to(
@@ -575,6 +586,15 @@ class AddContestHandler(BaseHandler):
 
             assert attrs.get("name") is not None, "No contest name specified."
 
+            allowed_localizations = \
+                self.get_argument("allowed_localizations", "")
+            if allowed_localizations:
+                attrs["allowed_localizations"] = \
+                    [x.strip() for x in allowed_localizations.split(",")
+                     if len(x) > 0 and not x.isspace()]
+            else:
+                attrs["allowed_localizations"] = []
+
             attrs["languages"] = self.get_arguments("languages", [])
 
             self.get_string(attrs, "token_mode")
@@ -632,6 +652,15 @@ class ContestHandler(BaseHandler):
             self.get_string(attrs, "description")
 
             assert attrs.get("name") is not None, "No contest name specified."
+
+            allowed_localizations = \
+                self.get_argument("allowed_localizations", "")
+            if allowed_localizations:
+                attrs["allowed_localizations"] = \
+                    [x.strip() for x in allowed_localizations.split(",")
+                     if len(x) > 0 and not x.isspace()]
+            else:
+                attrs["allowed_localizations"] = []
 
             attrs["languages"] = self.get_arguments("languages", [])
 
@@ -1014,7 +1043,7 @@ class AddDatasetHandler(BaseHandler):
             self.sql_session.add(dataset)
 
         except Exception as error:
-            logger.warning("Invalid field: %s" % (traceback.format_exc()))
+            logger.warning("Invalid field.", exc_info=True)
             self.application.service.add_notification(
                 make_datetime(), "Invalid field(s)", repr(error))
             self.redirect("/add_dataset/%s/%s" % (task_id, dataset_id_to_copy))
@@ -1269,6 +1298,162 @@ class AddTestcaseHandler(BaseHandler):
             self.redirect("/task/%s" % task.id)
         else:
             self.redirect("/add_testcase/%s" % dataset_id)
+
+
+class AddTestcasesHandler(BaseHandler):
+    """Add several testcases to a dataset.
+
+    """
+    def get(self, dataset_id):
+        dataset = self.safe_get_item(Dataset, dataset_id)
+        task = dataset.task
+        self.contest = task.contest
+
+        self.r_params = self.render_params()
+        self.r_params["task"] = task
+        self.r_params["dataset"] = dataset
+        self.render("add_testcases.html", **self.r_params)
+
+    def post(self, dataset_id):
+        # TODO: this method is quite long, some splitting is needed.
+        dataset = self.safe_get_item(Dataset, dataset_id)
+        task = dataset.task
+        self.contest = task.contest
+
+        try:
+            archive = self.request.files["archive"][0]
+        except KeyError:
+            self.application.service.add_notification(
+                make_datetime(),
+                "Invalid data",
+                "Please choose tests archive.")
+            self.redirect("/add_testcases/%s" % dataset_id)
+            return
+
+        public = self.get_argument("public", None) is not None
+        overwrite = self.get_argument("overwrite", None) is not None
+
+        # Get input/output file names templates, or use default ones.
+        input_template = self.get_argument("input_template", None)
+        if not input_template:
+            input_template = "input.*"
+        output_template = self.get_argument("output_template", None)
+        if not output_template:
+            output_template = "output.*"
+        input_re = re.compile(re.escape(input_template).replace("\\*",
+                              "(.*)") + "$")
+        output_re = re.compile(re.escape(output_template).replace("\\*",
+                               "(.*)") + "$")
+
+        task_name = task.name
+        self.sql_session.close()
+
+        fp = StringIO(archive["body"])
+        try:
+            with zipfile.ZipFile(fp, "r") as archive_zfp:
+                tests = dict()
+                # Match input/output file names to testcases' codenames.
+                for filename in archive_zfp.namelist():
+                    match = input_re.match(filename)
+                    if match:
+                        codename = match.group(1)
+                        if codename not in tests:
+                            tests[codename] = [None, None]
+                        tests[codename][0] = filename
+                    else:
+                        match = output_re.match(filename)
+                        if match:
+                            codename = match.group(1)
+                            if codename not in tests:
+                                tests[codename] = [None, None]
+                            tests[codename][1] = filename
+
+                skipped_tc = []
+                overwritten_tc = []
+                added_tc = []
+                for codename, testdata in tests.iteritems():
+                    # If input or output file isn't found, skip it.
+                    if not testdata[0] or not testdata[1]:
+                        continue
+                    self.sql_session = Session()
+
+                    # Check, whether current testcase already exists.
+                    dataset = self.safe_get_item(Dataset, dataset_id)
+                    task = dataset.task
+                    self.contest = task.contest
+                    if codename in dataset.testcases:
+                        # If we are allowed, remove existing testcase.
+                        # If not - skip this testcase.
+                        if overwrite:
+                            testcase = dataset.testcases[codename]
+                            self.sql_session.delete(testcase)
+
+                            if not try_commit(self.sql_session, self):
+                                skipped_tc.append(codename)
+                                continue
+                            overwritten_tc.append(codename)
+                        else:
+                            skipped_tc.append(codename)
+                            continue
+
+                    # Add current testcase.
+                    try:
+                        input_ = archive_zfp.read(testdata[0])
+                        output = archive_zfp.read(testdata[1])
+                    except Exception as error:
+                        self.application.service.add_notification(
+                            make_datetime(),
+                            "Reading testcase %s failed" % codename,
+                            repr(error))
+                        self.redirect("/add_testcases/%s" % dataset_id)
+                        return
+                    try:
+                        input_digest = self.application.service\
+                            .file_cacher.put_file_content(
+                                input_,
+                                "Testcase input for task %s" % task_name)
+                        output_digest = self.application.service\
+                            .file_cacher.put_file_content(
+                                output,
+                                "Testcase output for task %s" % task_name)
+                    except Exception as error:
+                        self.application.service.add_notification(
+                            make_datetime(),
+                            "Testcase storage failed",
+                            repr(error))
+                        self.redirect("/add_testcases/%s" % dataset_id)
+                        return
+                    testcase = Testcase(codename, public, input_digest,
+                                        output_digest, dataset=dataset)
+                    self.sql_session.add(testcase)
+
+                    if not try_commit(self.sql_session, self):
+                        self.application.service.add_notification(
+                            make_datetime(),
+                            "Couldn't add test %s" % codename,
+                            "")
+                        self.redirect("/add_testcases/%s" % dataset_id)
+                        return
+                    if codename not in overwritten_tc:
+                        added_tc.append(codename)
+        except zipfile.BadZipfile:
+            self.application.service.add_notification(
+                make_datetime(),
+                "The selected file is not a zip file.",
+                "Please select a valid zip file.")
+            self.redirect("/add_testcases/%s" % dataset_id)
+            return
+
+        self.application.service.add_notification(
+            make_datetime(),
+            "Successfully added %d and overwritten %d testcase(s)" %
+            (len(added_tc), len(overwritten_tc)),
+            "Added: %s; overwritten: %s; skipped: %s" %
+            (", ".join(added_tc) if added_tc else "none",
+             ", ".join(overwritten_tc) if overwritten_tc else "none",
+             ", ".join(skipped_tc) if skipped_tc else "none"))
+        self.application.service.proxy_service.reinitialize()
+        self.redirect("/task/%s" % task.id)
 
 
 class DeleteTestcaseHandler(BaseHandler):
@@ -1583,6 +1768,7 @@ class UserViewHandler(BaseHandler):
 
             self.get_string(attrs, "timezone", empty=None)
             self.get_datetime(attrs, "starting_time")
+            self.get_timedelta_sec(attrs, "delay_time")
             self.get_timedelta_sec(attrs, "extra_time")
 
             self.get_bool(attrs, "hidden")
@@ -1623,6 +1809,7 @@ class AddUserHandler(SimpleContestHandler("add_user.html")):
 
             self.get_string(attrs, "timezone", empty=None)
             self.get_datetime(attrs, "starting_time")
+            self.get_timedelta_sec(attrs, "delay_time")
             self.get_timedelta_sec(attrs, "extra_time")
 
             self.get_bool(attrs, "hidden")
@@ -1695,6 +1882,32 @@ class SubmissionFileHandler(FileHandler):
         self.fetch(digest, "text/plain", real_filename)
 
 
+class SubmissionCommentHandler(BaseHandler):
+    """Called when the admin comments on a submission.
+
+    """
+    def post(self, submission_id, dataset_id=None):
+        submission = self.safe_get_item(Submission, submission_id)
+
+        try:
+            attrs = {"comment": submission.comment}
+            self.get_string(attrs, "comment")
+            submission.set_attrs(attrs)
+
+        except Exception as error:
+            self.application.service.add_notification(
+                make_datetime(), "Invalid field(s)", repr(error))
+
+        else:
+            try_commit(self.sql_session, self)
+
+        if dataset_id is None:
+            self.redirect("/submission/%s" % submission_id)
+        else:
+            self.redirect("/submission/%s/%s" % (submission_id,
+                                                 dataset_id))
+
+
 class QuestionsHandler(BaseHandler):
     """Page to see and send messages to all the contestants.
 
@@ -1735,8 +1948,8 @@ class QuestionReplyHandler(BaseHandler):
         question.reply_timestamp = make_datetime()
 
         if try_commit(self.sql_session, self):
-            logger.info("Reply sent to user %s for question with id %s." %
-                        (question.user.username, question_id))
+            logger.info("Reply sent to user %s for question with id %s.",
+                        question.user.username, question_id)
 
         self.redirect(ref)
 
@@ -1758,9 +1971,9 @@ class QuestionIgnoreHandler(BaseHandler):
         # Commit the change.
         question.ignored = should_ignore
         if try_commit(self.sql_session, self):
-            logger.info("Question '%s' by user %s %s" %
-                        (question.subject, question.user.username,
-                         ["unignored", "ignored"][should_ignore]))
+            logger.info("Question '%s' by user %s %s",
+                        question.subject, question.user.username,
+                        ["unignored", "ignored"][should_ignore])
 
         self.redirect(ref)
 
@@ -1780,8 +1993,7 @@ class MessageHandler(BaseHandler):
                           user=user)
         self.sql_session.add(message)
         if try_commit(self.sql_session, self):
-            logger.info("Message submitted to user %s."
-                        % user.username)
+            logger.info("Message submitted to user %s.", user.username)
 
         self.redirect("/user/%s" % user_id)
 
@@ -1789,7 +2001,7 @@ class MessageHandler(BaseHandler):
 class FileFromDigestHandler(FileHandler):
 
     def get(self, digest, filename):
-        #TODO: Accept a MIME type
+        # TODO: Accept a MIME type
         self.sql_session.close()
         self.fetch(digest, "text/plain", filename)
 
@@ -1854,6 +2066,7 @@ _aws_handlers = [
     (r"/activate_dataset/([0-9]+)", ActivateDatasetHandler),
     (r"/autojudge_dataset/([0-9]+)", ToggleAutojudgeDatasetHandler),
     (r"/add_testcase/([0-9]+)", AddTestcaseHandler),
+    (r"/add_testcases/([0-9]+)", AddTestcasesHandler),
     (r"/delete_testcase/([0-9]+)", DeleteTestcaseHandler),
     (r"/user/([0-9]+)", UserViewHandler),
     (r"/add_user/([0-9]+)", AddUserHandler),
@@ -1861,6 +2074,7 @@ _aws_handlers = [
     (r"/remove_announcement/([0-9]+)", RemoveAnnouncementHandler),
     (r"/submission/([0-9]+)(?:/([0-9]+))?", SubmissionViewHandler),
     (r"/submission_file/([0-9]+)", SubmissionFileHandler),
+    (r"/submission_comment/([0-9]+)(?:/([0-9]+))?", SubmissionCommentHandler),
     (r"/file/([a-f0-9]+)/([a-zA-Z0-9_.-]+)", FileFromDigestHandler),
     (r"/message/([0-9]+)", MessageHandler),
     (r"/question/([0-9]+)", QuestionReplyHandler),

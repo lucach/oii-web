@@ -1,12 +1,14 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
-# Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
-# Copyright © 2010-2013 Stefano Maggiolo <s.maggiolo@gmail.com>
+# Contest Management System - http://cms-dev.github.io/
+# Copyright © 2010-2014 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
+# Copyright © 2010-2014 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
-# Copyright © 2012-2013 Luca Wehrstedt <luca.wehrstedt@gmail.com>
+# Copyright © 2012-2014 Luca Wehrstedt <luca.wehrstedt@gmail.com>
 # Copyright © 2013 Bernard Blackham <bernard@largestprime.net>
+# Copyright © 2014 Artem Iglikov <artem.iglikov@gmail.com>
+# Copyright © 2014 Fabian Gundlach <320pointsguy@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -35,6 +37,10 @@
 
 """
 
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import base64
 import gettext
 import glob
@@ -59,16 +65,16 @@ from sqlalchemy import func
 from werkzeug.http import parse_accept_header
 from werkzeug.datastructures import LanguageAccept
 
-from cms import SOURCE_EXT_TO_LANGUAGE_MAP, config, ServiceCoord
+from cms import SOURCE_EXT_TO_LANGUAGE_MAP, ConfigError, config, ServiceCoord
 from cms.io import WebService
 from cms.db import Session, Contest, User, Task, Question, Submission, Token, \
-    File, UserTest, UserTestFile, UserTestManager
+    File, UserTest, UserTestFile, UserTestManager, PrintJob
 from cms.db.filecacher import FileCacher
 from cms.grading.tasktypes import get_task_type
 from cms.grading.scoretypes import get_score_type
 from cms.server import file_handler_gen, extract_archive, \
     actual_phase_required, get_url_root, filter_ascii, \
-    CommonRequestHandler, format_size
+    CommonRequestHandler, format_size, compute_actual_phase
 from cmscommon.isocodes import is_language_code, translate_language_code, \
     is_country_code, translate_country_code, \
     is_language_country_code, translate_language_country_code
@@ -92,7 +98,7 @@ def check_ip(client, wanted):
     """
     wanted, sep, subnet = wanted.partition('/')
     subnet = 32 if sep == "" else int(subnet)
-    snmask = 2**32 - 2**(32 - subnet)
+    snmask = 2 ** 32 - 2 ** (32 - subnet)
     wanted = struct.unpack(">I", socket.inet_aton(wanted))[0]
     client = struct.unpack(">I", socket.inet_aton(client))[0]
     return (wanted & snmask) == (client & snmask)
@@ -180,20 +186,51 @@ class BaseHandler(CommonRequestHandler):
         return user
 
     def get_user_locale(self):
-        if config.installed:
-            localization_dir = os.path.join(
-                "/", "usr", "local", "share", "locale")
-        else:
-            localization_dir = os.path.join(os.path.dirname(__file__), "mo")
+        self.langs = self.application.service.langs
 
-        # Retrieve the available translations.
-        langs = ["en-US"] + [
-            path.split("/")[-3].replace("_", "-") for path in glob.glob(
-                os.path.join(localization_dir, "*", "LC_MESSAGES", "cms.mo"))]
+        if self.contest.allowed_localizations:
+            # We just check if a prefix of each language is allowed
+            # because this way one can just type "en" to include also
+            # "en-US" (and similar cases with other languages). It's
+            # the same approach promoted by HTTP in its Accept header
+            # parsing rules.
+            # TODO Be more fussy with prefix checking: validate strings
+            # (match with "[A-Za-z]+(-[A-Za-z]+)*") and verify that the
+            # prefix is on the dashes.
+            self.langs = [lang for lang in self.langs if any(
+                lang.startswith(prefix)
+                for prefix in self.contest.allowed_localizations)]
+
+        if not self.langs:
+            logger.warning("No allowed localization matches any installed one."
+                           "Resorting to en-US.")
+            self.langs = ["en-US"]
+        else:
+            # TODO Be more fussy with prefix checking: validate strings
+            # (match with "[A-Za-z]+(-[A-Za-z]+)*") and verify that the
+            # prefix is on the dashes.
+            useless = [
+                prefix for prefix in self.contest.allowed_localizations
+                if not any(lang.startswith(prefix) for lang in self.langs)]
+            if useless:
+                logger.warning("The following allowed localizations don't "
+                               "match any installed one: %s",
+                               ",".join(useless))
+
+        # TODO We fallback on any available language if none matches:
+        # we could return 406 Not Acceptable instead.
         # Select the one the user likes most.
-        lang = parse_accept_header(
+        self.browser_lang = parse_accept_header(
             self.request.headers.get("Accept-Language", ""),
-            LanguageAccept).best_match(langs, "en-US")
+            LanguageAccept).best_match(self.langs, self.langs[0])
+
+        self.cookie_lang = self.get_cookie("language", None)
+
+        if self.cookie_lang in self.langs:
+            lang = self.cookie_lang
+        else:
+            lang = self.browser_lang
+
         self.set_header("Content-Language", lang)
         lang = lang.replace("-", "_")
 
@@ -215,7 +252,7 @@ class BaseHandler(CommonRequestHandler):
             fallback=True)
         cms_locale = gettext.translation(
             "cms",
-            localization_dir,
+            self.application.service.localization_dir,
             [lang],
             fallback=True)
         cms_locale.add_fallback(iso_639_locale)
@@ -261,75 +298,23 @@ class BaseHandler(CommonRequestHandler):
         ret["timestamp"] = self.timestamp
         ret["contest"] = self.contest
         ret["url_root"] = get_url_root(self.request.path)
-        ret["cookie"] = str(self.cookies)  # FIXME really needed?
 
         ret["phase"] = self.contest.phase(self.timestamp)
 
+        ret["printing_enabled"] = (config.printer is not None)
+
         if self.current_user is not None:
-            # "adjust" the phase, considering the per_user_time
-            ret["actual_phase"] = 2 * ret["phase"]
+            res = compute_actual_phase(
+                self.timestamp, self.contest.start, self.contest.stop,
+                self.contest.per_user_time, self.current_user.starting_time,
+                self.current_user.delay_time, self.current_user.extra_time)
 
-            if ret["phase"] == -1:
-                # pre-contest phase
-                ret["current_phase_begin"] = None
-                ret["current_phase_end"] = self.contest.start
-            elif ret["phase"] == 0:
-                # contest phase
-                if self.contest.per_user_time is None:
-                    # "traditional" contest: every user can compete for
-                    # the whole contest time
-                    ret["current_phase_begin"] = self.contest.start
-                    ret["current_phase_end"] = self.contest.stop
-                else:
-                    # "USACO-like" contest: every user can compete only
-                    # for a limited time frame during the contest time
-                    if self.current_user.starting_time is None:
-                        ret["actual_phase"] = -1
-                        ret["current_phase_begin"] = self.contest.start
-                        ret["current_phase_end"] = self.contest.stop
-                    else:
-                        user_end_time = min(
-                            self.current_user.starting_time +
-                            self.contest.per_user_time,
-                            self.contest.stop)
-                        if self.timestamp <= user_end_time:
-                            ret["current_phase_begin"] = \
-                                self.current_user.starting_time
-                            ret["current_phase_end"] = user_end_time
-                        else:
-                            ret["actual_phase"] = +1
-                            ret["current_phase_begin"] = user_end_time
-                            ret["current_phase_end"] = self.contest.stop
-            else:  # ret["phase"] == 1
-                # post-contest phase
-                ret["current_phase_begin"] = self.contest.stop
-                ret["current_phase_end"] = None
+            ret["actual_phase"], ret["current_phase_begin"], \
+                ret["current_phase_end"], ret["valid_phase_begin"], \
+                ret["valid_phase_end"] = res
 
-            # compute valid_phase_begin and valid_phase_end (that is,
-            # the time at which actual_phase started/will start and
-            # stopped/will stop being zero, or None if unknown).
-            ret["valid_phase_begin"] = None
-            ret["valid_phase_end"] = None
-            if self.contest.per_user_time is None:
-                ret["valid_phase_begin"] = self.contest.start
-                ret["valid_phase_end"] = self.contest.stop
-            elif self.current_user.starting_time is not None:
-                ret["valid_phase_begin"] = self.current_user.starting_time
-                ret["valid_phase_end"] = min(
-                    self.current_user.starting_time +
-                    self.contest.per_user_time,
-                    self.contest.stop)
-
-            # consider the extra time
-            if ret["valid_phase_end"] is not None:
-                ret["valid_phase_end"] += self.current_user.extra_time
-                if ret["valid_phase_begin"] <= \
-                        self.timestamp <= \
-                        ret["valid_phase_end"]:
-                    ret["phase"] = 0
-                    ret["actual_phase"] = 0
-                    ret["current_phase_begin"] = ret["valid_phase_begin"]
-                    ret["current_phase_end"] = ret["valid_phase_end"]
+            if ret["actual_phase"] == 0:
+                ret["phase"] = 0
 
             # set the timezone used to format timestamps
             ret["timezone"] = get_timezone(self.current_user, self.contest)
@@ -344,6 +329,24 @@ class BaseHandler(CommonRequestHandler):
             ret["tokens_tasks"] = 2  # all infinite
         else:
             ret["tokens_tasks"] = 1  # all finite or mixed
+
+        ret["langs"] = self.langs
+
+        # TODO Now all language names are shown in the active language.
+        # It would be better to show them in the corresponding one.
+        ret["lang_names"] = {}
+        for lang in self.langs:
+            language_name = None
+            try:
+                language_name = translate_language_country_code(
+                    lang.replace("-", "_"), self.locale)
+            except ValueError:
+                language_name = translate_language_code(
+                    lang.replace("-", "_"), self.locale)
+            ret["lang_names"][lang] = language_name
+
+        ret["cookie_lang"] = self.cookie_lang
+        ret["browser_lang"] = self.browser_lang
 
         return ret
 
@@ -361,7 +364,7 @@ class BaseHandler(CommonRequestHandler):
             try:
                 self.sql_session.close()
             except Exception as error:
-                logger.warning("Couldn't close SQL connection: %r" % error)
+                logger.warning("Couldn't close SQL connection: %r", error)
         try:
             tornado.web.RequestHandler.finish(self, *args, **kwds)
         except IOError:
@@ -375,8 +378,8 @@ class BaseHandler(CommonRequestHandler):
                 kwargs["exc_info"][0] != tornado.web.HTTPError:
             exc_info = kwargs["exc_info"]
             logger.error(
-                "Uncaught exception (%r) while processing a request: %s" %
-                (exc_info[1], ''.join(traceback.format_exception(*exc_info))))
+                "Uncaught exception (%r) while processing a request: %s",
+                exc_info[1], ''.join(traceback.format_exception(*exc_info)))
 
         # We assume that if r_params is defined then we have at least
         # the data we need to display a basic template with the error
@@ -407,12 +410,22 @@ class ContestWebServer(WebService):
             "debug": config.tornado_debug,
             "is_proxy_used": config.is_proxy_used,
         }
+
+        try:
+            listen_address = config.contest_listen_address[shard]
+            listen_port = config.contest_listen_port[shard]
+        except IndexError:
+            raise ConfigError("Wrong shard number for %s, or missing "
+                              "address/port configuration. Please check "
+                              "contest_listen_address and contest_listen_port "
+                              "in cms.conf." % __name__)
+
         super(ContestWebServer, self).__init__(
-            config.contest_listen_port[shard],
+            listen_port,
             _cws_handlers,
             parameters,
             shard=shard,
-            listen_address=config.contest_listen_address[shard])
+            listen_address=listen_address)
 
         self.contest = contest
 
@@ -423,13 +436,33 @@ class ContestWebServer(WebService):
         # of tuples (timestamp, subject, text).
         self.notifications = {}
 
+        # Retrieve the available translations.
+        if config.installed:
+            self.localization_dir = os.path.join(
+                "/", "usr", "local", "share", "locale")
+        else:
+            self.localization_dir = os.path.join(
+                os.path.dirname(__file__), "mo")
+        self.langs = ["en-US"] + [
+            path.split("/")[-3].replace("_", "-") for path in glob.glob(
+                os.path.join(self.localization_dir,
+                             "*", "LC_MESSAGES", "cms.mo"))]
+
         self.file_cacher = FileCacher(self)
         self.evaluation_service = self.connect_to(
             ServiceCoord("EvaluationService", 0))
         self.scoring_service = self.connect_to(
             ServiceCoord("ScoringService", 0))
+
+        ranking_enabled = len(config.rankings) > 0
         self.proxy_service = self.connect_to(
-            ServiceCoord("ProxyService", 0))
+            ServiceCoord("ProxyService", 0),
+            must_be_present=ranking_enabled)
+
+        printing_enabled = config.printer is not None
+        self.printing_service = self.connect_to(
+            ServiceCoord("PrintingService", 0),
+            must_be_present=printing_enabled)
 
     NOTIFICATION_ERROR = "error"
     NOTIFICATION_WARNING = "warning"
@@ -484,25 +517,25 @@ class LoginHandler(BaseHandler):
         filtered_user = filter_ascii(username)
         filtered_pass = filter_ascii(password)
         if user is None or user.password != password:
-            logger.info("Login error: user=%s pass=%s remote_ip=%s." %
-                        (filtered_user, filtered_pass, self.request.remote_ip))
+            logger.info("Login error: user=%s pass=%s remote_ip=%s.",
+                        filtered_user, filtered_pass, self.request.remote_ip)
             self.redirect("/?login_error=true")
             return
         if config.ip_lock and user.ip is not None \
                 and not check_ip(self.request.remote_ip, user.ip):
-            logger.info("Unexpected IP: user=%s pass=%s remote_ip=%s." %
-                        (filtered_user, filtered_pass, self.request.remote_ip))
+            logger.info("Unexpected IP: user=%s pass=%s remote_ip=%s.",
+                        filtered_user, filtered_pass, self.request.remote_ip)
             self.redirect("/?login_error=true")
             return
         if user.hidden and config.block_hidden_users:
             logger.info("Hidden user login attempt: "
-                        "user=%s pass=%s remote_ip=%s." %
-                        (filtered_user, filtered_pass, self.request.remote_ip))
+                        "user=%s pass=%s remote_ip=%s.",
+                        filtered_user, filtered_pass, self.request.remote_ip)
             self.redirect("/?login_error=true")
             return
 
-        logger.info("User logged in: user=%s remote_ip=%s." %
-                    (filtered_user, self.request.remote_ip))
+        logger.info("User logged in: user=%s remote_ip=%s.",
+                    filtered_user, self.request.remote_ip)
         self.set_secure_cookie("login",
                                pickle.dumps((user.username,
                                              user.password,
@@ -522,7 +555,7 @@ class StartHandler(BaseHandler):
     def post(self):
         user = self.get_current_user()
 
-        logger.info("Starting now for user %s" % user.username)
+        logger.info("Starting now for user %s", user.username)
         user.starting_time = self.timestamp
         self.sql_session.commit()
 
@@ -589,8 +622,35 @@ class TaskSubmissionsHandler(BaseHandler):
             .filter(Submission.user == self.current_user)\
             .filter(Submission.task == task).all()
 
+        submissions_left_contest = None
+        if self.contest.max_submission_number is not None:
+            submissions_c = self.sql_session\
+                .query(func.count(Submission.id))\
+                .join(Submission.task)\
+                .filter(Task.contest == self.contest)\
+                .filter(Submission.user == self.current_user).scalar()
+            submissions_left_contest = \
+                self.contest.max_submission_number - submissions_c
+
+        submissions_left_task = None
+        if task.max_submission_number is not None:
+            submissions_left_task = \
+                task.max_submission_number - len(submissions)
+
+        submissions_left = submissions_left_contest
+        if submissions_left_task is not None and \
+            (submissions_left_contest is None or
+             submissions_left_contest > submissions_left_task):
+            submissions_left = submissions_left_task
+
+        # Make sure we do not show negative value if admins changed
+        # the maximum
+        if submissions_left is not None:
+            submissions_left = max(0, submissions_left)
+
         self.render("task_submissions.html",
-                    task=task, submissions=submissions, **self.r_params)
+                    task=task, submissions=submissions,
+                    submissions_left=submissions_left, **self.r_params)
 
 
 class TaskStatementViewHandler(FileHandler):
@@ -763,7 +823,7 @@ class NotificationsHandler(BaseHandler):
         prev_unread_count = self.get_secure_cookie("unread_count")
         next_unread_count = len(res) + (
             int(prev_unread_count) if prev_unread_count is not None else 0)
-        self.set_secure_cookie("unread_count", str(next_unread_count))
+        self.set_secure_cookie("unread_count", "%d" % next_unread_count)
 
         # Simple notifications
         notifications = self.application.service.notifications
@@ -797,8 +857,8 @@ class QuestionHandler(BaseHandler):
         self.sql_session.add(question)
         self.sql_session.commit()
 
-        logger.info("Question submitted by user %s."
-                    % self.current_user.username)
+        logger.info("Question submitted by user %s.",
+                    self.current_user.username)
 
         # Add "All ok" notification.
         self.application.service.add_notification(
@@ -1061,15 +1121,14 @@ class SubmitHandler(BaseHandler):
                 # therefore we open the file in binary mode.
                 with io.open(
                         os.path.join(path,
-                                     str(int(make_timestamp(self.timestamp)))),
+                                     "%d" % make_timestamp(self.timestamp)),
                         "wb") as file_:
                     pickle.dump((self.contest.id,
                                  self.current_user.id,
                                  task.id,
                                  files), file_)
             except Exception as error:
-                logger.warning("Submission local copy failed - %s" %
-                               traceback.format_exc())
+                logger.warning("Submission local copy failed.", exc_info=True)
 
         # We now have to send all the files to the destination...
         try:
@@ -1083,7 +1142,7 @@ class SubmitHandler(BaseHandler):
 
         # In case of error, the server aborts the submission
         except Exception as error:
-            logger.error("Storage failed! %s" % error)
+            logger.error("Storage failed! %s", error)
             self.application.service.add_notification(
                 self.current_user.username,
                 self.timestamp,
@@ -1094,7 +1153,7 @@ class SubmitHandler(BaseHandler):
             return
 
         # All the files are stored, ready to submit!
-        logger.info("All files stored for submission sent by %s" %
+        logger.info("All files stored for submission sent by %s",
                     self.current_user.username)
         submission = Submission(self.timestamp,
                                 submission_lang,
@@ -1151,8 +1210,7 @@ class UseTokenHandler(BaseHandler):
             self.timestamp)
         if tokens_available[0] == 0 or tokens_available[2] is not None:
             logger.warning("User %s tried to play a token "
-                           "when it shouldn't."
-                           % self.current_user.username)
+                           "when it shouldn't.", self.current_user.username)
             # Add "no luck" notification
             self.application.service.add_notification(
                 self.current_user.username,
@@ -1179,15 +1237,15 @@ class UseTokenHandler(BaseHandler):
             self.redirect("/tasks/%s/submissions" % quote(task.name, safe=''))
             return
 
-        # Inform ScoringService and eventually the ranking that the
+        # Inform ProxyService and eventually the ranking that the
         # token has been played.
         self.application.service.proxy_service.submission_tokened(
             submission_id=submission.id)
 
-        logger.info("Token played by user %s on task %s."
-                    % (self.current_user.username, task.name))
+        logger.info("Token played by user %s on task %s.",
+                    self.current_user.username, task.name)
 
-        # Add "All ok" notification
+        # Add "All ok" notification.
         self.application.service.add_notification(
             self.current_user.username,
             self.timestamp,
@@ -1305,7 +1363,17 @@ class UserTestInterfaceHandler(BaseHandler):
     @actual_phase_required(0)
     def get(self):
         user_tests = dict()
+        user_tests_left = dict()
         default_task = None
+
+        user_tests_left_contest = None
+        if self.contest.max_user_test_number is not None:
+            user_test_c = self.sql_session.query(func.count(UserTest.id))\
+                .join(UserTest.task)\
+                .filter(Task.contest == self.contest)\
+                .filter(UserTest.user == self.current_user).scalar()
+            user_tests_left_contest = \
+                self.contest.max_user_test_number - user_test_c
 
         for task in self.contest.tasks:
             if self.request.query == task.name:
@@ -1313,12 +1381,28 @@ class UserTestInterfaceHandler(BaseHandler):
             user_tests[task.id] = self.sql_session.query(UserTest)\
                 .filter(UserTest.user == self.current_user)\
                 .filter(UserTest.task == task).all()
+            user_tests_left_task = None
+            if task.max_user_test_number is not None:
+                user_tests_left_task = \
+                    task.max_user_test_number - len(user_tests[task.id])
 
-        if default_task is None:
+            user_tests_left[task.id] = user_tests_left_contest
+            if user_tests_left_task is not None and \
+                (user_tests_left_contest is None or
+                 user_tests_left_contest > user_tests_left_task):
+                user_tests_left[task.id] = user_tests_left_task
+
+            # Make sure we do not show negative value if admins changed
+            # the maximum
+            if user_tests_left[task.id] is not None:
+                user_tests_left[task.id] = max(0, user_tests_left[task.id])
+
+        if default_task is None and len(self.contest.tasks) > 0:
             default_task = self.contest.tasks[0]
 
         self.render("test_interface.html", default_task=default_task,
-                    user_tests=user_tests, **self.r_params)
+                    user_tests=user_tests, user_tests_left=user_tests_left,
+                    **self.r_params)
 
 
 class UserTestHandler(BaseHandler):
@@ -1339,8 +1423,8 @@ class UserTestHandler(BaseHandler):
         # Check that the task is testable
         task_type = get_task_type(dataset=task.active_dataset)
         if not task_type.testable:
-            logger.warning("User %s tried to make test on task %s." %
-                           (self.current_user.username, task_name))
+            logger.warning("User %s tried to make test on task %s.",
+                           self.current_user.username, task_name)
             raise tornado.web.HTTPError(404)
 
         # Alias for easy access
@@ -1583,15 +1667,14 @@ class UserTestHandler(BaseHandler):
                 # therefore we open the file in binary mode.
                 with io.open(
                         os.path.join(path,
-                                     str(int(make_timestamp(self.timestamp)))),
+                                     "%d" % make_timestamp(self.timestamp)),
                         "wb") as file_:
                     pickle.dump((self.contest.id,
                                  self.current_user.id,
                                  task.id,
                                  files), file_)
             except Exception as error:
-                logger.error("Test local copy failed - %s" %
-                             traceback.format_exc())
+                logger.error("Test local copy failed.", exc_info=True)
 
         # We now have to send all the files to the destination...
         try:
@@ -1605,7 +1688,7 @@ class UserTestHandler(BaseHandler):
 
         # In case of error, the server aborts the submission
         except Exception as error:
-            logger.error("Storage failed! %s" % error)
+            logger.error("Storage failed! %s", error)
             self.application.service.add_notification(
                 self.current_user.username,
                 self.timestamp,
@@ -1616,7 +1699,7 @@ class UserTestHandler(BaseHandler):
             return
 
         # All the files are stored, ready to submit!
-        logger.info("All files stored for test sent by %s" %
+        logger.info("All files stored for test sent by %s",
                     self.current_user.username)
         user_test = UserTest(self.timestamp,
                              submission_lang,
@@ -1802,6 +1885,121 @@ class UserTestFileHandler(FileHandler):
         self.fetch(digest, mimetype, real_filename)
 
 
+class PrintingHandler(BaseHandler):
+    """Serve the interface to print and handle submitted print jobs.
+
+    """
+    @tornado.web.authenticated
+    @actual_phase_required(0)
+    def get(self):
+        if not self.r_params["printing_enabled"]:
+            self.redirect("/")
+            return
+
+        printjobs = self.sql_session.query(PrintJob)\
+            .filter(PrintJob.user == self.current_user).all()
+
+        remaining_jobs = max(0, config.max_jobs_per_user - len(printjobs))
+
+        self.render("printing.html",
+                    printjobs=printjobs,
+                    remaining_jobs=remaining_jobs,
+                    max_pages=config.max_pages_per_job,
+                    pdf_printing_allowed=config.pdf_printing_allowed,
+                    **self.r_params)
+
+    @tornado.web.authenticated
+    @actual_phase_required(0)
+    def post(self):
+        if not self.r_params["printing_enabled"]:
+            self.redirect("/")
+            return
+
+        printjobs = self.sql_session.query(PrintJob)\
+            .filter(PrintJob.user == self.current_user).all()
+        old_count = len(printjobs)
+        if config.max_jobs_per_user <= old_count:
+            self.application.service.add_notification(
+                self.current_user.username,
+                self.timestamp,
+                self._("Too many print jobs!"),
+                self._("You have reached the maximum limit of "
+                       "at most %d print jobs.") % config.max_jobs_per_user,
+                ContestWebServer.NOTIFICATION_ERROR)
+            self.redirect("/printing")
+            return
+
+        # Ensure that the user did not submit multiple files with the
+        # same name and that the user sent exactly one file.
+        if any(len(filename) != 1
+               for filename in self.request.files.values()) \
+                or set(self.request.files.keys()) != set(["file"]):
+            self.application.service.add_notification(
+                self.current_user.username,
+                self.timestamp,
+                self._("Invalid format!"),
+                self._("Please select the correct files."),
+                ContestWebServer.NOTIFICATION_ERROR)
+            self.redirect("/printing")
+            return
+
+        filename = self.request.files["file"][0]["filename"]
+        data = self.request.files["file"][0]["body"]
+
+        # Check if submitted file is small enough.
+        if len(data) > config.max_print_length:
+            self.application.service.add_notification(
+                self.current_user.username,
+                self.timestamp,
+                self._("File too big!"),
+                self._("Each file must be at most %d bytes long.") %
+                config.max_print_length,
+                ContestWebServer.NOTIFICATION_ERROR)
+            self.redirect("/printing")
+            return
+
+        # We now have to send the file to the destination...
+        try:
+            digest = self.application.service.file_cacher.put_file_content(
+                data,
+                "Print job sent by %s at %d." % (
+                    self.current_user.username,
+                    make_timestamp(self.timestamp)))
+
+        # In case of error, the server aborts
+        except Exception as error:
+            logger.error("Storage failed! %s", error)
+            self.application.service.add_notification(
+                self.current_user.username,
+                self.timestamp,
+                self._("Print job storage failed!"),
+                self._("Please try again."),
+                ContestWebServer.NOTIFICATION_ERROR)
+            self.redirect("/printing")
+            return
+
+        # The file is stored, ready to submit!
+        logger.info("File stored for print job sent by %s",
+                    self.current_user.username)
+
+        printjob = PrintJob(timestamp=self.timestamp,
+                            user=self.current_user,
+                            filename=filename,
+                            digest=digest)
+
+        self.sql_session.add(printjob)
+        self.sql_session.commit()
+        self.application.service.printing_service.new_printjob(
+            printjob_id=printjob.id)
+        self.application.service.add_notification(
+            self.current_user.username,
+            self.timestamp,
+            self._("Print job received"),
+            self._("Your print job has been received."),
+            ContestWebServer.NOTIFICATION_SUCCESS)
+        self.redirect("/printing")
+
+
 class StaticFileGzHandler(tornado.web.StaticFileHandler):
     """Handle files which may be gzip-compressed on the filesystem."""
     def get(self, path, *args, **kwargs):
@@ -1849,5 +2047,6 @@ _cws_handlers = [
     (r"/notifications", NotificationsHandler),
     (r"/question", QuestionHandler),
     (r"/testing", UserTestInterfaceHandler),
+    (r"/printing", PrintingHandler),
     (r"/stl/(.*)", StaticFileGzHandler, {"path": config.stl_path}),
 ]

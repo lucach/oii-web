@@ -1,7 +1,7 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2012 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2012 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
@@ -22,6 +22,10 @@
 """Service that checks the answering times of all services.
 
 """
+
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import unicode_literals
 
 import logging
 import time
@@ -54,7 +58,7 @@ class Checker(Service):
         logger.debug("Checker.check")
         for coordinates, service in self.remote_services.iteritems():
             if coordinates in self.waiting_for:
-                logger.info("Service %s timeout, retrying." % str(coordinates))
+                logger.info("Service %s timeout, retrying.", coordinates)
                 del self.waiting_for[coordinates]
 
             if service.connected:
@@ -63,7 +67,7 @@ class Checker(Service):
                 service.echo(string="%s %5.3lf" % (coordinates, now),
                              callback=self.echo_callback)
             else:
-                logger.info("Service %s not connected." % str(coordinates))
+                logger.info("Service %s not connected.", coordinates)
         return True
 
     def echo_callback(self, data, error=None):
@@ -81,13 +85,13 @@ class Checker(Service):
             shard = int(shard)
             service = ServiceCoord(name, shard)
             if service not in self.waiting_for or current - time_ > 10:
-                logger.warning("Got late reply (%5.3lf s) from %s."
-                               % (current - time_, service))
+                logger.warning("Got late reply (%5.3lf s) from %s.",
+                               current - time_, service)
             else:
                 if time_ - self.waiting_for[service] > 0.001:
                     logger.warning("Someone cheated on the timestamp?!")
-                logger.info("Got reply (%5.3lf s) from %s."
-                            % (current - time_, service))
+                logger.info("Got reply (%5.3lf s) from %s.",
+                            current - time_, service)
                 del self.waiting_for[service]
         except KeyError:
             logger.error("Echo answer mis-shapen.")

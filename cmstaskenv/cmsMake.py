@@ -1,7 +1,7 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2012 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
@@ -21,9 +21,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
 from __future__ import print_function
+from __future__ import unicode_literals
 
 import argparse
+import io
 import os
 import sys
 import subprocess
@@ -33,6 +36,7 @@ import shutil
 import tempfile
 import yaml
 
+from cms import utf8_decoder
 from cms.grading import get_compilation_commands
 from cmstaskenv.Test import test_testcases, clean_test_env
 
@@ -118,13 +122,13 @@ def parse_task_yaml(base_dir):
     yaml_path = os.path.join(base_dir, "task.yaml")
 
     try:
-        with open(yaml_path) as yaml_file:
+        with io.open(yaml_path, "rt", encoding="utf-8") as yaml_file:
             conf = yaml.load(yaml_file)
     except IOError:
         yaml_path = os.path.join(parent_dir, "%s.yaml" %
                                  (detect_task_name(base_dir)))
 
-        with open(yaml_path) as yaml_file:
+        with io.open(yaml_path, "rt", encoding="utf-8") as yaml_file:
             conf = yaml.load(yaml_file)
     return conf
 
@@ -313,12 +317,18 @@ def build_text_list(base_dir, task_type):
 
 def iter_GEN(name):
     st = 0
-    for l in open(name, "r"):
+    for l in io.open(name, "rt", encoding="utf-8"):
         if l[:4] == "#ST:":
             st += 1
-        l = (" " + l).split("#")[0][1:].strip("\n")
+        if l[:6] == "#COPY:":
+            hardcoded = True
+            l = l[7:]
+        else:
+            hardcoded = False
+            l = (" " + l).split("#")[0][1:]
+        l = l.strip("\n")
         if l != "":
-            yield (l, st)
+            yield (hardcoded, l, st)
 
 
 def build_gen_list(base_dir, task_type):
@@ -368,7 +378,7 @@ def build_gen_list(base_dir, task_type):
     # usually generating inputs is a pretty long thing. Answer:
     # because cmsMake architecture, which is based on file timestamps,
     # doesn't make us able to understand which lines of gen/GEN have
-    # been changed. Douch! We'll have to thing better this thing for
+    # been changed. Douch! We'll have to think better this thing for
     # the new format we're developing.
     def make_input(assume=None):
         n = 0
@@ -376,17 +386,23 @@ def build_gen_list(base_dir, task_type):
             os.makedirs(input_dir)
         except OSError:
             pass
-        for (line, st) in iter_GEN(os.path.join(base_dir, gen_GEN)):
+        for (hardcoded, line, st) in iter_GEN(os.path.join(base_dir, gen_GEN)):
             print("Generating input # %d" % (n), file=sys.stderr)
-            with open(os.path.join(input_dir,
-                                   'input%d.txt' % (n)), 'w') as fout:
-                call(base_dir,
-                     [gen_exe] + line.split(),
-                     stdout=fout)
-            command = [validator_exe, os.path.join(input_dir,
-                                                   'input%d.txt' % (n))]
+            new_input = os.path.join(input_dir, 'input%d.txt' % (n))
+            if hardcoded:
+                # Copy the file
+                print("> Copy input file from:", line)
+                hardcoded_input = os.path.join(base_dir, line)
+                shutil.copyfile(hardcoded_input, new_input)
+            else:
+                # Call the generator
+                with io.open(new_input, 'wb') as fout:
+                    call(base_dir,
+                         [gen_exe] + line.split(),
+                         stdout=fout)
+            command = [validator_exe, new_input]
             if st != 0:
-                command.append(str(st))
+                command.append("%s" % st)
             call(base_dir, command)
             n += 1
 
@@ -396,9 +412,10 @@ def build_gen_list(base_dir, task_type):
         except OSError:
             pass
         print("Generating output # %d" % (n), file=sys.stderr)
-        with open(os.path.join(input_dir, 'input%d.txt' % (n))) as fin:
-            with open(os.path.join(output_dir,
-                                   'output%d.txt' % (n)), 'w') as fout:
+        with io.open(os.path.join(input_dir,
+                                  'input%d.txt' % (n)), 'rb') as fin:
+            with io.open(os.path.join(output_dir,
+                                      'output%d.txt' % (n)), 'wb') as fout:
                 call(base_dir, [sol_exe], stdin=fin, stdout=fout)
 
     actions = []
@@ -586,30 +603,25 @@ def main():
     # Parse command line options
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group()
-    parser.add_argument("-D", "--base-dir",
+    parser.add_argument("-D", "--base-dir", action="store", type=utf8_decoder,
                         help="base directory for problem to make "
-                        "(CWD by default)",
-                        dest="base_dir", action="store", default=None)
-    parser.add_argument("-l", "--list",
-                        help="list actions that cmsMake is aware of",
-                        dest="list", action="store_true", default=False)
-    parser.add_argument("-c", "--clean",
-                        help="clean all generated files",
-                        dest="clean", action="store_true", default=False)
-    parser.add_argument("-a", "--all",
-                        help="make all targets",
-                        dest="all", action="store_true", default=False)
+                        "(CWD by default)")
+    parser.add_argument("-l", "--list", action="store_true", default=False,
+                        help="list actions that cmsMake is aware of")
+    parser.add_argument("-c", "--clean", action="store_true", default=False,
+                        help="clean all generated files")
+    parser.add_argument("-a", "--all", action="store_true", default=False,
+                        help="make all targets")
     group.add_argument("-y", "--yes",
-                       help="answer yes to all questions", const='y',
-                       dest="assume", action="store_const", default=None)
+                       dest="assume", action="store_const", const='y',
+                       help="answer yes to all questions")
     group.add_argument("-n", "--no",
-                       help="answer no to all questions", const='n',
-                       dest="assume", action="store_const")
-    parser.add_argument("-d", "--debug",
-                        help="enable debug messages",
-                        dest="debug", action="store_true", default=False)
-    parser.add_argument("targets", metavar="target", nargs="*",
-                        help="target to build", type=str)
+                       dest="assume", action="store_const", const='n',
+                       help="answer no to all questions")
+    parser.add_argument("-d", "--debug", action="store_true", default=False,
+                        help="enable debug messages")
+    parser.add_argument("targets", action="store", type=utf8_decoder,
+                        nargs="*", metavar="target", help="target to build")
     options = parser.parse_args()
 
     base_dir = options.base_dir

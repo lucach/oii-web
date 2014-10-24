@@ -35,9 +35,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import desc
 from sqlalchemy.sql import or_, and_
 
-from cms import config, SOURCE_EXT_TO_LANGUAGE_MAP
+from cms import config, ServiceCoord, SOURCE_EXT_TO_LANGUAGE_MAP
 from cms.io import Service
-from cms import ServiceCoord
 from cms.db.filecacher import FileCacher
 from cms.db import SessionGen, User, Submission, File, Task, Test, Tag, \
     Forum, Topic, Post, TestScore, Institute, Region, Province, City, \
@@ -423,9 +422,9 @@ class APIHandler(object):
                local.data['old_password'] != '':
                 old_token = self.hashpw(local.data['old_password'])
                 if local.user.password != old_token:
-                    return 'user.edit.wrong'
+                    return 'Wrong password'
                 if len(local.data['password']) < 5:
-                    return 'signup.errors.password'
+                    return 'Password\'s too short'
                 new_token = self.hashpw(local.data['password'])
                 local.user.password = new_token
                 local.resp['token'] = new_token
@@ -517,7 +516,7 @@ class APIHandler(object):
                 return 'Unauthorized'
             try:
                 if len(local.data['description']) < 5:
-                    return 'tags.description_short'
+                    return 'Description is too short'
                 else:
                     tag = Tag(name=local.data['tag'],
                               description=local.data['description'],
@@ -889,10 +888,10 @@ class APIHandler(object):
                 return 'Unauthorized'
             if local.data['title'] is None or \
                len(local.data['title']) < 4:
-                return "forum.title_short"
+                return "Title is too short"
             if local.data['description'] is None or \
                len(local.data['description']) < 4:
-                return "forum.description_short"
+                return "Description is too short"
             forum = Forum(title=local.data['title'],
                           description=local.data['description'],
                           access_level=7,
@@ -915,14 +914,14 @@ class APIHandler(object):
             local.resp['description'] = forum.description
             query = local.session.query(Topic)\
                 .filter(Topic.forum_id == forum.id)\
-                .order_by(desc(Topic.timestamp))
+                .order_by(desc(Topic.sticky), desc(Topic.timestamp))
             topics, local.resp['num'] = self.sliced_query(query)
-            local.resp['numUnanswered'] = local.session.query(Topic)\
+            local.resp['numUnsolved'] = local.session.query(Topic)\
                 .filter(Topic.forum_id == forum.id)\
-                .filter(Topic.answered == False).count()
+                .filter(Topic.solved == False).count()
             local.resp['topics'] = []
             for t in topics:
-                if noAnswer and t.answered is True:
+                if noAnswer and t.solved is True:
                     continue
                 topic = dict()
                 topic['id'] = t.id
@@ -932,6 +931,8 @@ class APIHandler(object):
                 topic['posts'] = t.npost
                 topic['views'] = t.nview
                 topic['author_username'] = t.author.username
+                topic['sticky'] = t.sticky
+                topic['solved'] = t.solved
                 topic['lastpost'] = {
                     'username':  t.last_writer.username,
                     'timestamp': make_timestamp(t.timestamp)
@@ -949,15 +950,19 @@ class APIHandler(object):
                 return "forum.title_short"
             if local.data['text'] is None or len(local.data['text']) < 4:
                 return "post.text_short"
+            if local.data['sticky'] is None or \
+                (local.data['sticky'] != False and local.data['sticky'] != True):
+                raise KeyError
             topic = Topic(status='open',
                           title=local.data['title'],
                           timestamp=make_datetime(),
                           creation_timestamp=make_datetime(),
-                          answered=False)
+                          solved=False)
             topic.forum = forum
             topic.last_writer = local.user
             topic.author = local.user
             topic.npost = 1
+            topic.sticky = local.data['sticky']
             post = Post(text=local.data['text'],
                         timestamp=make_datetime())
             post.author = local.user
@@ -970,7 +975,7 @@ class APIHandler(object):
                 .filter(Post.forum_id == forum.id).count()
             local.session.commit()
         else:
-            return 'Bad request'
+            raise KeyError
 
     def post_handler(self):
         if local.data['action'] == 'list':
@@ -1003,14 +1008,13 @@ class APIHandler(object):
             if topic is None or topic.forum.access_level < local.access_level:
                 return 'Not found'
             if local.data['text'] is None or len(local.data['text']) < 4:
-                return "post.text_short"
+                return "Text is too short"
             post = Post(text=local.data['text'],
                         timestamp=make_datetime())
             post.author = local.user
             post.topic = topic
             post.forum = topic.forum
             topic.timestamp = post.timestamp
-            topic.answered = True
             topic.last_writer = local.user
             local.session.add(post)
             topic.forum.npost = local.session.query(Post)\
@@ -1050,7 +1054,7 @@ class APIHandler(object):
             if post.author != local.user and local.user.access_level > 2:
                 return 'Unauthorized'
             if local.data['text'] is None or len(local.data['text']) < 4:
-                return 'post.text_short'
+                return 'Text is too short'
             post.text = local.data['text']
             local.session.commit()
         else:
@@ -1156,7 +1160,6 @@ class PracticeWebServer(Service):
 
     '''
     def __init__(self, shard):
-
         Service.__init__(self, shard=shard)
 
         self.address = config.contest_listen_address[shard]

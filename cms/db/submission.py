@@ -1,12 +1,13 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2012 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2012 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
 # Copyright © 2012-2013 Luca Wehrstedt <luca.wehrstedt@gmail.com>
 # Copyright © 2013 Bernard Blackham <bernard@largestprime.net>
+# Copyright © 2014 Fabian Gundlach <320pointsguy@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -26,6 +27,7 @@
 """
 
 from __future__ import absolute_import
+from __future__ import print_function
 from __future__ import unicode_literals
 
 from sqlalchemy.schema import Column, ForeignKey, ForeignKeyConstraint, \
@@ -86,6 +88,17 @@ class Submission(Base):
         String,
         nullable=True)
 
+    # Comment from the administrator on the submission.
+    comment = Column(
+        Unicode,
+        nullable=False,
+        default="")
+
+    @property
+    def short_comment(self):
+        """The first line of the comment."""
+        return self.comment.split("\n", 1)[0]
+
     # Follows the description of the fields automatically added by
     # SQLAlchemy.
     # files (dict of File objects indexed by filename)
@@ -93,6 +106,16 @@ class Submission(Base):
     # results (list of SubmissionResult objects)
 
     def get_result(self, dataset=None):
+        """Return the result associated to a dataset.
+
+        dataset (Dataset|None): the dataset for which the caller wants
+            the submission result; if None, the active one is used.
+
+        return (SubmissionResult|None): the submission result
+            associated to this submission and the given dataset, if it
+            exists in the database, otherwise None.
+
+        """
         if dataset is not None:
             # Use IDs to avoid triggering a lazy-load query.
             assert self.task_id == dataset.task_id
@@ -104,6 +127,16 @@ class Submission(Base):
             (self.id, dataset_id), self.sa_session)
 
     def get_result_or_create(self, dataset=None):
+        """Return and, if necessary, create the result for a dataset.
+
+        dataset (Dataset|None): the dataset for which the caller wants
+            the submission result; if None, the active one is used.
+
+        return (SubmissionResult): the submission result associated to
+            the this submission and the given dataset; if it
+            does not exists, a new one is created.
+
+        """
         if dataset is None:
             dataset = self.task.active_dataset
 
@@ -292,7 +325,8 @@ class SubmissionResult(Base):
     # Score as computed by ScoringService. Null means not yet scored.
     score = Column(
         Float,
-        nullable=True)
+        nullable=True,
+        index=True)
 
     # Score details. It's a JSON-encoded string containing information
     # that is given to ScoreType.get_html_details to generate an HTML
@@ -599,4 +633,5 @@ class Evaluation(Base):
 
     @property
     def codename(self):
+        """Return the codename of the testcase."""
         return self.testcase.codename

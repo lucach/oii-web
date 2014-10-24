@@ -1,8 +1,8 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
-# Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
+# Contest Management System - http://cms-dev.github.io/
+# Copyright © 2010-2014 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2012 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
 # Copyright © 2012-2014 Luca Wehrstedt <luca.wehrstedt@gmail.com>
@@ -26,6 +26,7 @@
 """
 
 from __future__ import absolute_import
+from __future__ import print_function
 from __future__ import unicode_literals
 
 from datetime import timedelta
@@ -431,6 +432,16 @@ class Dataset(Base):
     # SQLAlchemy.
     # managers (dict of Manager objects indexed by filename)
     # testcases (dict of Testcase objects indexed by codename)
+
+    @property
+    def active(self):
+        """Shorthand for detecting if the dataset is active.
+
+        return (bool): True if this dataset is the active one for its
+            task.
+
+        """
+        return self is self.task.active_dataset
 
 
 class Manager(Base):

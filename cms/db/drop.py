@@ -1,7 +1,7 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-# Programming contest management system
+# Contest Management System - http://cms-dev.github.io/
 # Copyright © 2010-2013 Giovanni Mascellani <mascellani@poisson.phc.unipi.it>
 # Copyright © 2010-2013 Stefano Maggiolo <s.maggiolo@gmail.com>
 # Copyright © 2010-2012 Matteo Boscariol <boscarim@hotmail.com>
@@ -20,7 +20,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+"""Drop all content and tables in the database.
+
+"""
+
 from __future__ import absolute_import
+from __future__ import print_function
 from __future__ import unicode_literals
 
 import logging
@@ -63,7 +68,7 @@ def drop_db():
         logger.error("Couldn't drop schema \"public\", probably you don't "
                      "have the privileges. Please execute as database "
                      "superuser: \"ALTER SCHEMA public OWNER TO %s;\" and "
-                     "run again" % make_url(config.database).username)
+                     "run again", make_url(config.database).username)
         return False
     cursor.execute("CREATE SCHEMA public")
 
@@ -74,11 +79,11 @@ def drop_db():
         logger.error("Couldn't list large objects, probably you don't have "
                      "the privileges. Please execute as database superuser: "
                      "\"GRANT SELECT ON pg_largeobject TO %s;\" and run "
-                     "again" % make_url(config.database).username)
+                     "again", make_url(config.database).username)
         return False
     rows = cursor.fetchall()
     for row in rows:
-        cursor.execute("SELECT lo_unlink(%d)" % (row[0]))
+        cursor.execute("SELECT lo_unlink(%d)" % row[0])
 
     cursor.close()
 

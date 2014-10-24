@@ -6,7 +6,7 @@ Introduction
 
 In the CMS terminology, the task type of a task describes how to compile and evaluate the submissions for that task. In particular, they may require additional files called managers, provided by the admins.
 
-A submission goes through two steps involving the task type (that might also be empty): the compilation, that usually creates an executable from the submitted files, and the evaluation, that runs this executable against the set of testcases and produces an outcome for each of them.
+A submission goes through two steps involving the task type: the compilation, that usually creates an executable from the submitted files, and the evaluation, that runs this executable against the set of testcases and produces an outcome for each of them.
 
 Note that the outcome doesn't need to be obviously tied to the score for the submission: typically, the outcome is computed by a grader (which is an executable or a program stub passed to CMS) or a comparator (a program that decides if the output of the contestant's program is correct) and not by the task type. Hence, the task type doesn't need to know the meaning of the outcome, which is instead known by the grader and by the :doc:`score type <Score types>`.
 
@@ -15,6 +15,8 @@ Standard task types
 ===================
 
 CMS ships with four task types: Batch, OutputOnly, Communication, TwoSteps. The first two are well tested and reasonably strong against cheating attempts and stable with respect to the evaluation times. Communication should be usable but it is less tested than the first two. The last one, TwoSteps, is probably not ready for usage in a public competition. The first two task types cover all but three of the IOI tasks up to IOI 2012.
+
+OutputOnly does not involve programming languages. Batch works with all supported languages (C, C++, Pascal, Java, Python, PHP), but only the first four if you are using a grader. The other task types have not been tested with Java, Python or PHP.
 
 You can configure, for each task, the behavior of these task types on the task's page in AdminWebServer.
 
@@ -30,11 +32,13 @@ The source file is either standalone or to be compiled with a grader provided by
 
 The three choices (standalone or with a grader, standard input and output or files, diff or comparator) are specified through parameters.
 
-If the admins want to provide a grader that takes care of reading the input and writing the output (so that the contestants only need to write one or more functions), they must provide three managers, called :file:`grader.c`, :file:`grader.cpp` and :file:`grader.pas`. If header files are needed, they can be provided with names :file:`{task_name}.h` or :file:`{task_name}lib.pas`.
+If the admins want to provide a grader that takes care of reading the input and writing the output (so that the contestants only need to write one or more functions), they must provide a manager for each allowed language, called :file:`grader.ext`, where ``ext`` is the standard extension of a source file in that language. If header files for C/C++ or Pascal are needed, they can be provided with names :file:`{task_name}.h` or :file:`{task_name}lib.pas`. See the end of the section for specific issues of Java.
 
 If the output is compared with a diff, the outcome will be a float, 0.0 if the output is not correct, 1.0 if it is. If the output is validated by a comparator, you need to provide a manager called :file:`checker` that is an executable taking three arguments: input, correct output and contestant's output and that must write on standard output the outcome (that is going to be used by the score type, usually a float between 0.0 and 1.0), and on standard error a message to forward to the contestant.
 
 The submission format must contain one filename ending with ``.%l``. If there are additional files, the contestants are forced to submit them, the admins can inspect them, but they are not used towards the evaluation.
+
+Batch tasks are supported also for Java, with some requirements. The solutions of the contestants must contain a class named like the short name of the task. A grader must have a class named ``grader`` that in turns contains the main method; whether in this case the contestants should write a static method or a class is up to the admins.
 
 
 .. _tasktypes_outputonly:
@@ -44,7 +48,7 @@ OutputOnly
 
 In an OutputOnly task, the contestant submits a file for each testcase. Usually, the semantics is that the task specifies a task to be performed on an input file, and the admins provide a set of testcases composed of an input and an output file (as it is for a Batch task). The difference is that, instead of requiring a program that solves the task without knowing the input files, the contestant are required, given the input files, to provide the output files.
 
-There is only one parameter for OutputOnly tasks, namely how correctness of the contestants' outputs is checked. Similarly to the Batch task type, these can be checked using a diff or using a comparator, that is an executable manager named checker, with the same properties of the one for Batch tasks.
+There is only one parameter for OutputOnly tasks, namely how correctness of the contestants' outputs is checked. Similarly to the Batch task type, these can be checked using a diff or using a comparator, that is an executable manager named :file:`checker`, with the same properties of the one for Batch tasks.
 
 OutputOnly tasks usually have many uncorrelated files to be submitted. Contestants may submit the first output in a submission, and the second in another submission, but it is easy to forget  the first output in the other submission; it is also tedious to add every output every time. Hence, OutputOnly tasks have a feature that, if a submission lacks the output for a certain testcase, the current submission is completed with the most recently submitted output for that testcase (if it exists). This has the effect that contestants can work on a testcase at a time, submitting only what they did from the last submission.
 
